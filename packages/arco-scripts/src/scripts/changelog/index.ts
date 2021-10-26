@@ -1,5 +1,5 @@
 import fs from 'fs-extra';
-// import axios from 'axios';
+import axios from 'axios';
 import inquirer from 'inquirer';
 import moment from 'moment';
 import { configure } from 'nunjucks';
@@ -23,54 +23,78 @@ interface EmitInfo {
   data: any;
 }
 
+const typeMap: Record<string, string> = {
+  'New feature': 'feature',
+  'Bug fix': 'bugfix',
+  'Documentation change': 'unused',
+  'Coding style change': 'unused',
+  Refactoring: 'unused',
+  'Component style change': 'style',
+  'Performance improvement': 'optimization',
+  'Test cases': 'unused',
+  'Continuous integration': 'unused',
+  'Typescript definition change': 'typescript',
+  'Breaking change': 'attention',
+};
+
 const getRecords = (mr: any) => {
-  const content = mr.description.replace(/\r\n/g, '\n');
+  const content = mr.body.replace(/\r\n/g, '\n');
 
   const records: Array<Record<string, any>> = [];
-  const rule = new RegExp(
-    // Table title
-    '## Changelog\\n\\n' +
-      // Table title
-      '\\|(.+)\\|\\n' +
-      // Alignment info
-      '\\|(?:[-:]+[-| :]*)\\|\\n' +
-      // Table content
-      '((?:\\|.*\\|(?:\\n|$))*)'
-  );
 
-  const matchResult = content.match(rule);
-  if (matchResult) {
-    const titles = matchResult[1].split('|').map((item: string) => item.toLowerCase().trim());
-    const lines = matchResult[2].split('\n').filter((value: string) => Boolean(value.trim()));
-    for (const line of lines) {
-      const items = line
-        .split('|')
-        .slice(1)
-        .map((value: string) => value.trim());
-      const data = titles.reduce(
-        (data: Record<string, any>, title: string, index: number) => {
-          switch (title) {
-            case 'type':
-              data[title] = items[index].toLowerCase();
-              break;
-            case 'issue': {
-              const match = (items[index] ?? '').match(/#\d+/g);
-              if (match) {
-                data[title] = match.map((item: string) => item.slice(1));
+  const typeRule = new RegExp('## Types of changes.+?\\[x] (.+?)\\n', 's');
+
+  const typeString = content.match(typeRule)?.[1];
+
+  const type = typeMap[typeString];
+
+  if (type && type !== 'unused') {
+    const rule = new RegExp(
+      // Table title
+      '## Changelog\\n\\n' +
+        // Table title
+        '\\|(.+)\\|\\n' +
+        // Alignment info
+        '\\|(?:[-: ]+[-| :]*)\\|\\n' +
+        // Table content
+        '((?:\\|.*\\|(?:\\n|$))*)'
+    );
+
+    const matchResult = content.match(rule);
+    if (matchResult) {
+      const titles = matchResult[1].split('|').map((item: string) => item.toLowerCase().trim());
+      const lines = matchResult[2].split('\n').filter((value: string) => Boolean(value.trim()));
+      for (const line of lines) {
+        const items = line
+          .split('|')
+          .slice(1)
+          .map((value: string) => value.trim());
+        const data = titles.reduce(
+          (data: Record<string, any>, title: string, index: number) => {
+            switch (title) {
+              case 'type':
+                data[title] = items[index].toLowerCase();
+                break;
+              case 'related issues': {
+                const match = (items[index] ?? '').match(/#\d+/g);
+                if (match) {
+                  data.issue = match.map((item: string) => item.slice(1));
+                }
+                break;
               }
-              break;
+              default:
+                data[title] = items[index];
             }
-            default:
-              data[title] = items[index];
-          }
-          return data;
-        },
-        {
-          mrId: mr.iid,
-          mrURL: mr.web_url,
-        } as Record<string, any>
-      );
-      records.push(data);
+            return data;
+          },
+          {
+            mrId: mr.number,
+            mrURL: mr.html_url,
+            type,
+          } as Record<string, any>
+        );
+        records.push(data);
+      }
     }
   }
 
@@ -125,8 +149,8 @@ const getEmitsFromChangelog = async (changelog: Changelog): Promise<EmitInfo[]> 
       item.component = answer.component;
     }
 
-    const contentCN = `${item['changelog(cn)']}([!${item.mrId}](${item.mrURL}))`;
-    const contentEN = `${item['changelog(en)']}([!${item.mrId}](${item.mrURL}))`;
+    const contentCN = `${item['changelog(cn)']}([#${item.mrId}](${item.mrURL}))`;
+    const contentEN = `${item['changelog(en)']}([#${item.mrId}](${item.mrURL}))`;
     addAll({ ...item, content: contentCN }, allCN);
     addAll({ ...item, content: contentEN }, addEN);
     addComponent({ ...item, content: contentCN }, componentCN);
@@ -262,10 +286,13 @@ const run = async () => {
     needMerge = answer.merge;
   }
 
-  const res: any = {};
+  const res = await axios.get(
+    `https://api.github.com/search/issues?accept=application/vnd.github.v3+json&q=repo:arco-design/arco-design+is:pr+is:closed+milestone:${version}`
+  );
 
   if (res.status === 200) {
     let { data } = res;
+    data = data?.items;
 
     if (needMerge) {
       const betaVersions = getBetaVersions(currentContent);
@@ -277,10 +304,12 @@ const run = async () => {
       const files = new Set(['site/docs/version_v2.zh-CN.md', 'site/docs/version_v2.en-US.md']);
       for (const betaVersion of betaVersions) {
         // eslint-disable-next-line no-await-in-loop
-        const res2: any = { betaVersion };
+        const res2 = await axios.get(
+          `https://api.github.com/search/issues?accept=application/vnd.github.v3+json&q=repo:arco-design/arco-design+is:pr+is:closed+milestone:${betaVersion}`
+        );
         if (res2.status === 200) {
-          data = data.concat(res2.data);
-          for (const item of res2.data) {
+          data = data.concat(res2.data?.items ?? []);
+          for (const item of res2.data?.items ?? []) {
             const records = getRecords(item);
             for (const record of records) {
               let component = record.component;
